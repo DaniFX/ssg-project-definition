@@ -2,14 +2,14 @@
 
 ## Panoramica del Progetto
 
-Sistema di API Gateway written in Go, deployato su Google Cloud Platform utilizzando Cloud Run. L'architettura prevede un servizio dedicato per funzionalità (es. auth-service, user-service, order-service, etc.), comunicazione tramite gRPC, autenticazione centralizzata con Firebase, database NoSQL Firestore e storage per file su Google Cloud Storage.
+Sistema di API Gateway written in Go, deployato su Google Cloud Platform utilizzando Cloud Run. L'architettura prevede un servizio dedicato per funzionalità (es. auth-service, user-service, order-service, etc.), comunicazione tramite HTTP/REST, autenticazione centralizzata con Firebase, database NoSQL Firestore e storage per file su Google Cloud Storage.
 
 ## Stack Tecnologico
 
 ### Backend
 
 - **Linguaggio**: Go 1.21+
-- **Framework**: Fiber o Gin (HTTP), gRPC (comunicazione interna)
+- **Framework**: Fiber o Gin (HTTP per comunicazione interna ed esterna)
 - **Database**: Firestore (Google Cloud Firestore)
 - **Storage**: Google Cloud Storage
 - **Autenticazione**: Firebase Auth
@@ -28,19 +28,19 @@ Sistema di API Gateway written in Go, deployato su Google Cloud Platform utilizz
 │   Frontend     │  (React/Angular su Firebase Hosting)
 │  (SPA Static)  │
 └────────┬────────┘
-         │ HTTPS
-         ▼
+          │ HTTPS
+          ▼
 ┌─────────────────────────────────────┐
 │      Cloudflare WAF                 │  (Protezione DDoS, Bot, SQLi, XSS)
 └────────┬────────────────────────────┘
-         │
-         ▼
+          │
+          ▼
 ┌─────────────────┐
 │  API Gateway   │  (Go su Cloud Run)
 │   (Go + Gin)   │
 └────────┬────────┘
-         │ gRPC
-         ▼
+          │ HTTP/REST
+          ▼
 ┌─────────────────────────────────────┐
 │         Microservices               │
 ├─────────────────────────────────────┤
@@ -51,8 +51,8 @@ Sistema di API Gateway written in Go, deployato su Google Cloud Platform utilizz
 │  • Payment Service                  │
 │  • Notification Service             │
 └────────┬──────────────────┬────────┘
-         │                  │
-         ▼                  ▼
+          │                  │
+          ▼                  ▼
 ┌─────────────────┐  ┌─────────────────┐
 │   Firestore     │  │   Cloud Storage │
 │   (Database)    │  │   (File Store)  │
@@ -69,6 +69,7 @@ Sistema di API Gateway written in Go, deployato su Google Cloud Platform utilizz
 - Validazione JWT token Firebase
 - Logging e monitoring centralizzato
 - Circuit breaker per resilienza
+- Comunicazione con i microservizi tramite HTTP/REST
 
 ### Auth Service
 
@@ -112,33 +113,96 @@ Sistema di API Gateway written in Go, deployato su Google Cloud Platform utilizz
 - SMS (opzionale)
 - Template notifications
 
+## Service Discovery and Communication Contract
+
+### Service Registration
+
+Each microservice must expose a discovery endpoint (`GET /_discover`) accessible only from the API Gateway (via Cloud Run ingress rules). This endpoint returns a JSON document describing the service:
+
+```json
+{
+  "serviceName": "string",
+  "version": "string (semver)",
+  "metadata": {
+    // arbitrary key-value pairs for service-specific configuration
+  },
+  "endpoints": [
+    {
+      "path": "/api/v1/resource",
+      "method": "GET|POST|PUT|DELETE|PATCH",
+      "summary": "Brief description of endpoint purpose",
+      "inputSchema": {
+        // JSON Schema describing valid request body/query parameters
+        // Optional if endpoint takes no input
+      },
+      "outputSchema": {
+        // JSON Schema describing successful response body
+        // Optional for endpoints with no meaningful response
+      },
+      "authRequired": boolean,
+      "rateLimit": {
+        "requestsPerMinute": integer,
+        "burst": integer
+      }
+    }
+  ]
+}
+```
+
+### Gateway Responsibilities
+
+1. **Service Discovery**: On startup and periodically (configurable interval), the gateway queries each registered service's `/_discover` endpoint.
+2. **Dynamic Route Registration**: For each endpoint discovered, the gateway creates an external-facing route that proxies to the service.
+3. **Request/Response Validation**: If schemas are provided, the gateway validates incoming requests against `inputSchema` and outgoing responses against `outputSchema`.
+4. **Error Handling**: Transforms service errors into standardized HTTP error responses.
+5. **Security**: Enforces authentication requirements and applies rate limits as specified.
+
+### Best Practices
+
+- **Versioning**: Services should include semantic version in discovery to allow graceful evolution.
+- **Idempotency**: All endpoints should be designed to be idempotent where appropriate (PUT, DELETE, safe POSTs).
+- **Standard Error Format**: Services should return errors in the project's standard format:
+  ```json
+  {
+    "success": false,
+    "error": {
+      "code": "ERROR_CODE",
+      "message": "Human readable message",
+      "details": { /* optional additional info */ }
+    }
+  }
+  ```
+- **Health Checks**: Services should also expose a `/healthz` endpoint returning 200 when healthy.
+- **Security**: Discovery endpoint should be restricted to the gateway's service account or IP range via Cloud Run ingress settings.
+- **Schema Evolution**: Use backward-compatible changes to schemas; version endpoints when breaking changes are necessary.
+
+This approach allows the gateway to remain agnostic of specific service implementations while providing a typed, validated interface to external consumers.
+
 ## Struttura Progetti Go
 
 ```
-/api-gateway
-├── cmd/
-│   └── gateway/
-│       └── main.go
-├── internal/
-│   ├── config/
-│   ├── handlers/
-│   ├── middleware/
-│   ├── models/
-│   ├── services/
-│   └── repository/
-├── proto/
-├── pkg/
-├── go.mod
-└── Dockerfile
+ /api-gateway
+ ├── cmd/
+ │   └── gateway/
+ │       └── main.go
+ ├── internal/
+ │   ├── config/
+ │   ├── handlers/
+ │   ├── middleware/
+ │   ├── models/
+ │   ├── services/
+ │   └── repository/
+ ├── pkg/
+ ├── go.mod
+ └── Dockerfile
 
-/auth-service
-├── cmd/
-│   └── auth/
-│       └── main.go
-├── internal/
-├── proto/
-├── go.mod
-└── Dockerfile
+ /auth-service
+ ├── cmd/
+ │   └── auth/
+ │       └── main.go
+ ├── internal/
+ ├── go.mod
+ └── Dockerfile
 ```
 
 ## API Design
@@ -298,9 +362,9 @@ Il traffico è protetto da Cloudflare WAF che fornisce:
 
 - [ ] Progettare architettura dettagliata
 - [ ] Definire specifice API REST
-- [ ] Definire proto files per gRPC
+- [ ] Definire contratto di service discovery e comunicazione
 - [ ] Creare repository Go base
-- [ ] Implementare API Gateway
+- [ ] Implementare API Gateway con HTTP/REST
 - [ ] Implementare Auth Service
 - [ ] Implementare User Service
 - [ ] Implementare Order Service
@@ -315,8 +379,7 @@ Il traffico è protetto da Cloudflare WAF che fornisce:
 ## Note
 
 - Un servizio per container Cloud Run
-- Comunicazione interna in gRPC
-- Comunicazione esterna via REST attraverso Gateway
+- Comunicazione interna ed esterna tramite HTTP/REST
 - Tutti i servizi devono essere idempotenti
 - Implementare health check per Cloud Run
 - Usare context Go per timeout e cancellazione
